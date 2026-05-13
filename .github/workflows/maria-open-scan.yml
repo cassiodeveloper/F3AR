@@ -1,0 +1,116 @@
+name: MARIA Open Scan Pack
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+  actions: read
+
+jobs:
+  maria-open-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MARIA_API_URL: ${{ vars.MARIA_API_URL }}
+      MARIA_REPOSITORY_ID: "f427f613-de06-43f6-aec0-a8dfe7b227a5"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare results directory
+        run: mkdir -p maria-results
+
+      - name: Semgrep SAST
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/src" semgrep/semgrep:1.162.0 \
+            semgrep scan --config p/ci --sarif --output /src/maria-results/semgrep.sarif /src || true
+        continue-on-error: true
+
+      - name: Gitleaks Secret Scan
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/path" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            detect --source /path --report-format sarif --report-path /path/maria-results/gitleaks.sarif --redact --exit-code 0 || true
+        continue-on-error: true
+
+      - name: OSV Scanner
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/src" ghcr.io/google/osv-scanner:v2.3.8 \
+            scan source --recursive --format sarif --output-file /src/maria-results/osv.sarif /src || true
+        continue-on-error: true
+
+      - name: Trivy container and filesystem scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          version: v0.70.0
+          format: sarif
+          output: maria-results/trivy-fs.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+        continue-on-error: true
+
+      - name: KICS IaC Scan
+        uses: Checkmarx/kics-github-action@v2.1.20
+        with:
+          path: .
+          output_path: maria-results
+          output_formats: sarif
+          exclude_paths: node_modules,vendor
+          ignore_on_exit: results
+        continue-on-error: true
+
+      - name: Normalize KICS SARIF path
+        run: |
+          if [ -f maria-results/results.sarif ]; then mv maria-results/results.sarif maria-results/kics.sarif; fi
+        continue-on-error: true
+
+      - name: OWASP ZAP Baseline
+        uses: zaproxy/action-baseline@v0.15.0
+        with:
+          target: ${{ vars.MARIA_ZAP_TARGET_URL }}
+          cmd_options: '-J zap-baseline.json'
+        continue-on-error: true
+
+      - name: Upload SARIF results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: maria-results
+        continue-on-error: true
+
+      - name: Upload SARIF results to MARIA
+        if: always()
+        shell: bash
+        env:
+          MARIA_UPLOAD_TOKEN: ${{ secrets.MARIA_UPLOAD_TOKEN }}
+        run: |
+          if [ -z "${MARIA_API_URL:-}" ]; then
+            echo "::error title=MARIA_API_URL is not configured::Create repository variable MARIA_API_URL with your MARIA public base URL, for example https://maria.example.com"
+            exit 1
+          fi
+          if [ -z "${MARIA_UPLOAD_TOKEN:-}" ]; then
+            echo "::error title=MARIA_UPLOAD_TOKEN is not configured::Create repository secret MARIA_UPLOAD_TOKEN with a MARIA upload token scoped to this repository."
+            exit 1
+          fi
+          shopt -s nullglob
+          sarif_files=(maria-results/*.sarif)
+          if [ ${#sarif_files[@]} -eq 0 ]; then
+            echo "No SARIF files generated; nothing to upload to MARIA."
+            exit 0
+          fi
+          for file in "${sarif_files[@]}"; do
+            curl -sS -X POST "$MARIA_API_URL/api/open-scan-pack/repositories/$MARIA_REPOSITORY_ID/artifacts/sarif" \
+              -H "Authorization: Bearer $MARIA_UPLOAD_TOKEN" \
+              -H "Idempotency-Key: $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(basename "$file")" \
+              -F "file=@$file"
+          done
