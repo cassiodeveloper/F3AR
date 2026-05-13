@@ -1,0 +1,8 @@
+title = "MARIA Gitleaks Config"
+
+[allowlist]
+description = "Ignore common test fixture paths. MARIA still redacts secret findings during ingestion."
+paths = [
+  '''(^|/)test(s)?/fixtures/''',
+  '''(^|/)docs/'''
+]
