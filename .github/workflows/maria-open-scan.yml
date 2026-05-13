@@ -1,0 +1,89 @@
+name: MARIA Open Scan Pack
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  maria-open-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MARIA_API_URL: ${{ vars.MARIA_API_URL }}
+      MARIA_REPOSITORY_ID: "f427f613-de06-43f6-aec0-a8dfe7b227a5"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare results directory
+        run: mkdir -p maria-results
+
+      - name: Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/ci
+          generateSarif: "1"
+        continue-on-error: true
+
+      - name: Collect Semgrep SARIF
+        run: if [ -f semgrep.sarif ]; then cp semgrep.sarif maria-results/semgrep.sarif; fi
+
+      - name: Gitleaks Secret Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+        continue-on-error: true
+
+      - name: OSV Scanner
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: --format sarif --output maria-results/osv.sarif .
+        continue-on-error: true
+
+      - name: Trivy container and filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          format: sarif
+          output: maria-results/trivy-fs.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+        continue-on-error: true
+
+      - name: KICS IaC Scan
+        uses: checkmarx/kics-github-action@v2.1.6
+        with:
+          path: .
+          output_path: maria-results
+          output_formats: sarif
+          exclude_paths: node_modules,vendor
+        continue-on-error: true
+
+      - name: Normalize KICS SARIF path
+        run: |
+          if [ -f maria-results/results.sarif ]; then mv maria-results/results.sarif maria-results/kics.sarif; fi
+        continue-on-error: true
+
+      - name: OWASP ZAP Baseline
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ vars.MARIA_ZAP_TARGET_URL }}
+          cmd_options: '-J zap-baseline.json'
+        continue-on-error: true
+
+      - name: Upload SARIF results to MARIA
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for file in maria-results/*.sarif; do
+            curl -sS -X POST "$MARIA_API_URL/api/open-scan-pack/repositories/$MARIA_REPOSITORY_ID/artifacts/sarif" \
+              -H "Authorization: Bearer ${{ secrets.MARIA_UPLOAD_TOKEN }}" \
+              -H "Idempotency-Key: $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(basename "$file")" \
+              -F "file=@$file"
+          done
