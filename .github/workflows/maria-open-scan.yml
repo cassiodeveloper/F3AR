@@ -1,0 +1,143 @@
+name: MARIA Open Scan Pack
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+  actions: read
+
+jobs:
+  maria-open-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MARIA_API_URL: ${{ vars.MARIA_API_URL }}
+      MARIA_ZAP_TARGET_URL: ${{ vars.MARIA_ZAP_TARGET_URL }}
+      MARIA_ZAP_API_TARGET: ${{ vars.MARIA_ZAP_API_TARGET }}
+      MARIA_REPOSITORY_ID: "f427f613-de06-43f6-aec0-a8dfe7b227a5"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Prepare results directory
+        run: mkdir -p maria-results
+
+      - name: Semgrep SAST
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/src" semgrep/semgrep:1.162.0 \
+            semgrep scan --config 'auto' --exclude 'tests/' --exclude 'test/' --exclude 'docs/' --exclude 'vendor/' --exclude 'node_modules/' --verbose --sarif --output /src/maria-results/semgrep.sarif /src || true
+        continue-on-error: true
+
+      - name: Gitleaks Secret Scan
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/path" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git --config /path/.gitleaks.toml --log-level info --verbose --ignore-gitleaks-allow \
+            --max-target-megabytes 0 --max-archive-depth 0 --max-decode-depth 0 \
+            --report-format sarif --report-path /path/maria-results/gitleaks.sarif --redact=100 --exit-code 0 /path || true
+
+      - name: OWASP Dependency-Check
+        shell: bash
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          nvd_args=()
+          if [ -n "${NVD_API_KEY:-}" ]; then
+            nvd_args+=(--nvdApiKey "$NVD_API_KEY")
+          fi
+          docker run --rm -v "$PWD:/src" -v "$PWD/maria-results:/report" owasp/dependency-check:12.2.2 \
+            --scan '/src' --format SARIF --out /report --project "$GITHUB_REPOSITORY" --failOnCVSS 11 --enableRetired --prettyPrint --disableOssIndex --disableNodeAudit \
+            "${nvd_args[@]}"
+          if [ -f maria-results/dependency-check-report.sarif ]; then mv maria-results/dependency-check-report.sarif maria-results/dependency-check.sarif; fi
+        continue-on-error: true
+
+      - name: Trivy container image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: ${{ vars.MARIA_TRIVY_IMAGE_REF }}
+          version: v0.70.0
+          format: sarif
+          output: maria-results/trivy-container.sarif
+          trivy-config: .trivy.yaml
+        continue-on-error: true
+
+      - name: KICS IaC Scan
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/path" checkmarx/kics:v2.1.20-debian scan \
+            --path '/path' --config /path/kics.config --output-path /path/maria-results \
+            --report-formats sarif --output-name kics --log-level INFO --disable-secrets --ignore-on-exit results || true
+        continue-on-error: true
+
+      - name: OWASP ZAP Baseline
+        shell: bash
+        run: |
+          if [ -z "${MARIA_ZAP_TARGET_URL:-}" ]; then
+            echo "::notice title=MARIA_ZAP_TARGET_URL is not configured::Skipping passive ZAP baseline. Configure this repository variable with an authorized target URL to enable DAST."
+            exit 0
+          fi
+          docker run --rm -v "$PWD:/zap/wrk/:rw" ghcr.io/zaproxy/zaproxy:2.17.0 zap-baseline.py \
+            -t "$MARIA_ZAP_TARGET_URL" -c /zap/wrk/.zap/rules.tsv \
+            -J /zap/wrk/maria-results/zap-baseline.json -m 1 -T 5 -l WARN -s -I || true
+          test -s maria-results/zap-baseline.json || { echo "::error title=ZAP JSON output missing::zap-baseline did not produce maria-results/zap-baseline.json"; exit 1; }
+
+      - name: Upload SARIF results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e
+        if: always()
+        with:
+          sarif_file: maria-results
+        continue-on-error: true
+
+      - name: Upload SARIF results to MARIA
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: bash
+        env:
+          MARIA_UPLOAD_TOKEN: ${{ secrets.MARIA_UPLOAD_TOKEN }}
+        run: |
+          if [ -z "${MARIA_API_URL:-}" ]; then
+            echo "::error title=MARIA_API_URL is not configured::Create repository variable MARIA_API_URL with your MARIA public base URL, for example https://maria.example.com"
+            exit 1
+          fi
+          if [ -z "${MARIA_UPLOAD_TOKEN:-}" ]; then
+            if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+              echo "::notice title=MARIA upload skipped::MARIA_UPLOAD_TOKEN is unavailable for this pull request context. Scans completed, but artifacts were not uploaded to MARIA."
+              exit 0
+            fi
+            echo "::error title=MARIA_UPLOAD_TOKEN is not configured::Create repository secret MARIA_UPLOAD_TOKEN with a MARIA upload token scoped to this repository."
+            exit 1
+          fi
+          shopt -s nullglob
+          sarif_files=(maria-results/*.sarif)
+          json_files=(maria-results/zap-*.json)
+          if [ ${#sarif_files[@]} -eq 0 ] && [ ${#json_files[@]} -eq 0 ]; then
+            echo "No SARIF or ZAP JSON files generated; nothing to upload to MARIA."
+            exit 0
+          fi
+          upload_failures=0
+          for file in "${sarif_files[@]}"; do
+            curl -sS --fail-with-body --retry 3 --retry-delay 2 --retry-connrefused -X POST "$MARIA_API_URL/api/open-scan-pack/repositories/$MARIA_REPOSITORY_ID/artifacts/sarif" \
+              -H "Authorization: Bearer $MARIA_UPLOAD_TOKEN" \
+              -H "Idempotency-Key: $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(basename "$file")" \
+              -F "file=@$file" || upload_failures=1
+          done
+          for file in "${json_files[@]}"; do
+            curl -sS --fail-with-body --retry 3 --retry-delay 2 --retry-connrefused -X POST "$MARIA_API_URL/api/open-scan-pack/repositories/$MARIA_REPOSITORY_ID/artifacts/json" \
+              -H "Authorization: Bearer $MARIA_UPLOAD_TOKEN" \
+              -H "Idempotency-Key: $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(basename "$file")" \
+              -F "file=@$file" || upload_failures=1
+          done
+          if [ "$upload_failures" -ne 0 ]; then
+            echo "::error title=MARIA artifact upload failed::At least one scanner artifact was not accepted by MARIA."
+            exit 1
+          fi
