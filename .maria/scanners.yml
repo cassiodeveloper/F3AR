@@ -1,0 +1,149 @@
+version: 1
+repository:
+  provider: github
+  id: "f427f613-de06-43f6-aec0-a8dfe7b227a5"
+  default_branch: "main"
+scanners:
+  semgrep:
+    enabled: true
+    name: "Semgrep CE"
+    category: "sast"
+    version: "1.162.0"
+    license: "LGPL-2.1"
+    output: "sarif"
+  opengrep:
+    enabled: false
+    name: "Opengrep"
+    category: "sast"
+    version: "1.20.0"
+    license: "LGPL-2.1"
+    output: "sarif"
+  gitleaks:
+    enabled: false
+    name: "Gitleaks"
+    category: "secrets"
+    version: "8.30.1"
+    license: "MIT"
+    output: "sarif"
+  trufflehog:
+    enabled: true
+    name: "TruffleHog"
+    category: "secrets"
+    version: "3.95.0"
+    license: "AGPL-3.0"
+    output: "sarif"
+  trivy-secret:
+    enabled: false
+    name: "Trivy Secret"
+    category: "secrets"
+    version: "0.70.0"
+    license: "Apache-2.0"
+    output: "sarif"
+  osv-scanner:
+    enabled: false
+    name: "OSV-Scanner"
+    category: "sca"
+    version: "2.3.8"
+    license: "Apache-2.0"
+    output: "sarif"
+  dependency-check:
+    enabled: true
+    name: "OWASP Dependency-Check"
+    category: "sca"
+    version: "12.2.2"
+    license: "Apache-2.0"
+    output: "sarif"
+  grype:
+    enabled: false
+    name: "Grype"
+    category: "sca"
+    version: "0.92.0"
+    license: "Apache-2.0"
+    output: "sarif"
+  trivy-sca:
+    enabled: false
+    name: "Trivy SCA"
+    category: "sca"
+    version: "0.70.0"
+    license: "Apache-2.0"
+    output: "sarif"
+  trivy-container:
+    enabled: true
+    name: "Trivy"
+    category: "container"
+    version: "0.70.0"
+    license: "Apache-2.0"
+    output: "sarif"
+  grype-container:
+    enabled: false
+    name: "Grype"
+    category: "container"
+    version: "0.92.0"
+    license: "Apache-2.0"
+    output: "sarif"
+  kics:
+    enabled: true
+    name: "KICS"
+    category: "iac"
+    version: "2.1.20"
+    license: "Apache-2.0"
+    output: "sarif"
+  checkov:
+    enabled: false
+    name: "Checkov"
+    category: "iac"
+    version: "3.2.527"
+    license: "Apache-2.0"
+    output: "sarif"
+  trivy-iac:
+    enabled: false
+    name: "Trivy IaC"
+    category: "iac"
+    version: "0.70.0"
+    license: "Apache-2.0"
+    output: "sarif"
+  zap-baseline:
+    enabled: true
+    name: "OWASP ZAP"
+    category: "dast"
+    version: "2.17.0"
+    license: "Apache-2.0"
+    output: "json"
+  nuclei:
+    enabled: false
+    name: "Nuclei"
+    category: "dast"
+    version: "3.8.0"
+    license: "MIT"
+    output: "sarif"
+  clamav:
+    enabled: true
+    name: "ClamAV"
+    category: "malware"
+    version: "1.4.3"
+    license: "GPL-2.0-only"
+    output: "sarif"
+  virustotal-hash:
+    enabled: false
+    name: "VirusTotal Hash Lookup"
+    category: "malware"
+    version: "v3 API"
+    license: "Commercial API terms"
+    output: "sarif"
+  cdxgen:
+    enabled: true
+    name: "cdxgen"
+    category: "sbom"
+    version: "12.0.0"
+    license: "Apache-2.0"
+    output: "CycloneDX JSON"
+  syft:
+    enabled: false
+    name: "Syft"
+    category: "sbom"
+    version: "1.38.0"
+    license: "Apache-2.0"
+    output: "CycloneDX JSON"
+upload:
+  endpoint: "${MARIA_API_URL}/api/open-scan-pack"
+  sarif_contract: "existing-maria-sarif-worker"
